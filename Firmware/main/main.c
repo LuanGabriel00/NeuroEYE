@@ -1,5 +1,5 @@
 /**
- * Eye-facing ESP32 camera stream over Wi-Fi (MJPEG).
+ * Eye-facing ESP32 camera stream over Wi-Fi (MJPEG) + Easy Wi-Fi Setup.
  * Fonte de vídeo: câmera USB (UVC) conectada na porta USB-OTG.
  */
 
@@ -14,6 +14,7 @@
 #include <esp_psram.h>
 #include <esp_heap_caps.h>
 #include <nvs_flash.h>
+#include <nvs.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -28,50 +29,24 @@
 #include "usb/usb_host.h"
 #include "usb/uvc_host.h"
 
-#ifndef portTICK_RATE_MS
-#define portTICK_RATE_MS portTICK_PERIOD_MS
-#endif
-
 static const char *TAG = "eye:stream";
-
-#if defined(CONFIG_WIFI_ROLE_STA)
-#define WIFI_SSID CONFIG_WIFI_SSID
-#define WIFI_PASS CONFIG_WIFI_PASSWORD
-#endif
 
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT      BIT1
-#define WIFI_MAX_RETRY     10
+#define WIFI_MAX_RETRY     6
+#define NVS_WIFI_NAMESPACE "wifi_creds"
 
 static EventGroupHandle_t s_wifi_event_group;
 static int s_retry_num = 0;
-
-/* ---- Rede (modo STA): ajuste para a sua rede ---------------------------- */
-
-#define NET_O1   192          /* os três primeiros números da sua rede */
-#define NET_O2   168
-#define NET_O3   0
-#define GW_HOST  1            /* último número do IP do roteador */
-
-/* MAC -> último número do IP. Troque pelos MACs reais das suas placas
- * (o MAC aparece no log de boot: "MAC: xx:xx:xx:xx:xx:xx").
- * Placa fora da tabela usa DHCP. */
-static const struct {
-    uint8_t mac[6];
-    uint8_t host;
-} k_boards[] = {
-    { {0x40, 0x42, 0x00, 0x46, 0x40, 0x40}, 50 },   /* ESP 1 */
-    { {0xe0, 0x72, 0xa1, 0xd9, 0xa0, 0x04}, 51 },   /* ESP 2 */
-};
-
-static int s_host = -1;   /* IP estático escolhido (-1 = DHCP) */
+static void wifi_event_handler(void *arg, esp_event_base_t event_base,
+                               int32_t event_id, void *event_data);
 
 /* ---- Configuração da câmera USB ----------------------------------------- */
 
-#define UVC_WIDTH           800
+#define UVC_WIDTH           640
 #define UVC_HEIGHT          480
-#define UVC_FPS             20
-#define UVC_MAX_FRAME_SIZE  (256 * 1024)   /* tamanho máximo de um frame MJPEG */
+#define UVC_FPS             15
+#define UVC_MAX_FRAME_SIZE  (256 * 1024)
 
 /* ---- Estado compartilhado do último frame ------------------------------- */
 
@@ -88,7 +63,8 @@ static uint32_t buf_caps(void)
     return esp_psram_is_initialized() ? MALLOC_CAP_SPIRAM : MALLOC_CAP_8BIT;
 }
 
-/* Chamado pelo driver UVC a cada frame. Só copia e retorna (não bloqueia). */
+/* ---- Câmera UVC (rodando no Core 1 para não travar Wi-Fi/HTTP no Core 0) - */
+
 static bool uvc_frame_cb(const uvc_host_frame_t *frame, void *user_ctx)
 {
     if (frame->data_len > 0 && frame->data_len <= UVC_MAX_FRAME_SIZE) {
@@ -99,7 +75,7 @@ static bool uvc_frame_cb(const uvc_host_frame_t *frame, void *user_ctx)
             xSemaphoreGive(s_frame_mutex);
         }
     }
-    return true;  /* devolve o buffer ao driver imediatamente */
+    return true;
 }
 
 static void uvc_event_cb(const uvc_host_stream_event_data_t *event, void *user_ctx)
@@ -113,7 +89,7 @@ static void uvc_event_cb(const uvc_host_stream_event_data_t *event, void *user_c
         ESP_LOGW(TAG, "Erro de transferência USB");
         break;
     case UVC_HOST_FRAME_BUFFER_OVERFLOW:
-        ESP_LOGW(TAG, "Overflow de frame buffer (aumente UVC_MAX_FRAME_SIZE ou reduza resolução)");
+        ESP_LOGW(TAG, "Overflow de frame buffer");
         break;
     default:
         break;
@@ -150,10 +126,10 @@ static esp_err_t open_uvc_stream(void)
         },
         .advanced = {
             .number_of_frame_buffers = 3,
-            .frame_size              = 0,   /* automático */
+            .frame_size              = UVC_MAX_FRAME_SIZE,
             .frame_heap_caps         = buf_caps(),
-            .number_of_urbs          = 3,
-            .urb_size                = 10 * 1024,
+            .number_of_urbs          = 4,
+            .urb_size                = 32 * 1024,
         },
     };
 
@@ -170,7 +146,6 @@ static esp_err_t open_uvc_stream(void)
     return ESP_OK;
 }
 
-/* Task que mantém a câmera aberta e reconecta se for desplugada/replugada. */
 static void uvc_manager_task(void *arg)
 {
     while (1) {
@@ -203,99 +178,189 @@ static esp_err_t init_camera(void)
         .intr_flags     = ESP_INTR_FLAG_LEVEL1,
     };
     ESP_ERROR_CHECK(usb_host_install(&host_config));
-    xTaskCreate(usb_lib_task, "usb_lib", 4096, NULL, 10, NULL);
+    xTaskCreatePinnedToCore(usb_lib_task, "usb_lib", 4096, NULL, 10, NULL, 1);
 
     const uvc_host_driver_config_t driver_config = {
         .driver_task_stack_size = 4096,
         .driver_task_priority   = 9,
-        .xCoreID                = 0,
+        .xCoreID                = 1,
         .create_background_task = true,
     };
     ESP_ERROR_CHECK(uvc_host_install(&driver_config));
 
-    xTaskCreate(uvc_manager_task, "uvc_mgr", 4096, NULL, 5, NULL);
+    xTaskCreatePinnedToCore(uvc_manager_task, "uvc_mgr", 4096, NULL, 5, NULL, 1);
     return ESP_OK;
 }
 
-/* ---- Wi-Fi STA ---------------------------------------------------------- */
+/* ---- NVS & Easy Wi-Fi Provisioning -------------------------------------- */
 
-#if defined(CONFIG_WIFI_ROLE_STA)
-
-static int lookup_host_octet(void)
+static bool load_wifi_credentials(char *ssid, size_t ssid_len, char *pass, size_t pass_len)
 {
-    uint8_t mac[6];
-    esp_read_mac(mac, ESP_MAC_WIFI_STA);
-    ESP_LOGI(TAG, "MAC: %02x:%02x:%02x:%02x:%02x:%02x",
-             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-    for (size_t i = 0; i < sizeof(k_boards) / sizeof(k_boards[0]); i++) {
-        if (memcmp(mac, k_boards[i].mac, 6) == 0) return k_boards[i].host;
+    nvs_handle_t handle;
+    if (nvs_open(NVS_WIFI_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) {
+        return false;
     }
-    return -1;   /* não encontrado: usa DHCP */
+    esp_err_t err1 = nvs_get_str(handle, "ssid", ssid, &ssid_len);
+    esp_err_t err2 = nvs_get_str(handle, "pass", pass, &pass_len);
+    nvs_close(handle);
+
+    return (err1 == ESP_OK && err2 == ESP_OK && strlen(ssid) > 0);
 }
 
-static void wifi_event_handler(void *arg, esp_event_base_t event_base,
-                               int32_t event_id, void *event_data)
+static esp_err_t save_wifi_credentials(const char *ssid, const char *pass)
 {
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        if (s_retry_num < WIFI_MAX_RETRY) {
-            esp_wifi_connect();
-            s_retry_num++;
-            ESP_LOGW(TAG, "Retrying Wi-Fi (%d/%d)", s_retry_num, WIFI_MAX_RETRY);
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_WIFI_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) return err;
+
+    nvs_set_str(handle, "ssid", ssid);
+    nvs_set_str(handle, "pass", pass);
+    err = nvs_commit(handle);
+    nvs_close(handle);
+    return err;
+}
+
+static void url_decode(char *dst, const char *src, size_t dst_size)
+{
+    size_t i = 0, j = 0;
+    while (src[i] && j + 1 < dst_size) {
+        if (src[i] == '+') {
+            dst[j++] = ' ';
+            i++;
+        } else if (src[i] == '%' && src[i + 1] && src[i + 2]) {
+            char hex[3] = { src[i + 1], src[i + 2], '\0' };
+            dst[j++] = (char)strtol(hex, NULL, 16);
+            i += 3;
         } else {
-            xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
+            dst[j++] = src[i++];
         }
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_CONNECTED) {
-        /* Com IP estático o GOT_IP pode não disparar; aqui garantimos o sinal. */
-        if (s_host > 0) {
-            ESP_LOGI(TAG, "Associado ao AP. Open http://%d.%d.%d.%d",
-                     NET_O1, NET_O2, NET_O3, s_host);
-            s_retry_num = 0;
-            xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
-        }
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
-        ESP_LOGI(TAG, "Connected. Open http://" IPSTR, IP2STR(&event->ip_info.ip));
-        s_retry_num = 0;
-        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
     }
+    dst[j] = '\0';
 }
 
-static esp_err_t init_wifi_sta(void)
+static esp_err_t setup_page_handler(httpd_req_t *req)
 {
-    s_wifi_event_group = xEventGroupCreate();
-    if (!s_wifi_event_group) {
-        ESP_LOGE(TAG, "Failed to create Wi-Fi event group");
-        return ESP_FAIL;
+    wifi_scan_config_t scan_cfg = { .show_hidden = false };
+    esp_wifi_scan_start(&scan_cfg, true);
+
+    uint16_t ap_count = 0;
+    esp_wifi_scan_get_ap_num(&ap_count);
+    if (ap_count > 15) ap_count = 15;
+
+    wifi_ap_record_t ap_list[15];
+    esp_wifi_scan_get_ap_records(&ap_count, ap_list);
+
+    char *html = malloc(4096);
+    if (!html) return httpd_resp_send_500(req);
+
+    int off = snprintf(html, 4096,
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>Easy Wi-Fi Setup</title>"
+        "<style>body{font-family:sans-serif;background:#121212;color:#eee;max-width:400px;margin:40px auto;padding:16px}"
+        "select,input,button{width:100%%;padding:10px;margin:8px 0;box-sizing:border-box;border-radius:6px;border:1px solid #444;background:#222;color:#fff}"
+        "button{background:#0066cc;border:none;font-weight:bold;cursor:pointer}</style></head><body>"
+        "<h2>Configurar Wi-Fi (EyeCam)</h2><form method='POST' action='/save'>"
+        "<label>Rede 2.4 GHz:</label><select name='ssid'>");
+
+    for (int i = 0; i < ap_count && off < 3400; i++) {
+        off += snprintf(html + off, 4096 - off,
+                        "<option value='%s'>%s (%d dBm)</option>",
+                        (char *)ap_list[i].ssid, (char *)ap_list[i].ssid, ap_list[i].rssi);
     }
 
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_t *netif = esp_netif_create_default_wifi_sta();
+    snprintf(html + off, 4096 - off,
+        "</select><label>Senha:</label><input type='password' name='pass' placeholder='Senha do Wi-Fi'>"
+        "<button type='submit'>Salvar e Conectar</button></form></body></html>");
 
-    s_host = lookup_host_octet();
-    if (s_host > 0) {
-        ESP_ERROR_CHECK(esp_netif_dhcpc_stop(netif));
+    httpd_resp_set_type(req, "text/html");
+    esp_err_t res = httpd_resp_send(req, html, HTTPD_RESP_USE_STRLEN);
+    free(html);
+    return res;
+}
 
-        esp_netif_ip_info_t ip_info = {};
-        ip_info.ip.addr      = ESP_IP4TOADDR(NET_O1, NET_O2, NET_O3, s_host);
-        ip_info.gw.addr      = ESP_IP4TOADDR(NET_O1, NET_O2, NET_O3, GW_HOST);
-        ip_info.netmask.addr = ESP_IP4TOADDR(255, 255, 255, 0);
-        ESP_ERROR_CHECK(esp_netif_set_ip_info(netif, &ip_info));
+static esp_err_t save_wifi_handler(httpd_req_t *req)
+{
+    char buf[256] = {0};
+    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (len <= 0) return httpd_resp_send_500(req);
 
-        esp_netif_dns_info_t dns = {};
-        dns.ip.u_addr.ip4.addr = ESP_IP4TOADDR(NET_O1, NET_O2, NET_O3, GW_HOST);
-        dns.ip.type = ESP_IPADDR_TYPE_V4;
-        ESP_ERROR_CHECK(esp_netif_set_dns_info(netif, ESP_NETIF_DNS_MAIN, &dns));
+    char raw_ssid[64] = {0}, raw_pass[64] = {0};
+    char ssid[33] = {0}, pass[65] = {0};
 
-        ESP_LOGI(TAG, "IP estático: %d.%d.%d.%d", NET_O1, NET_O2, NET_O3, s_host);
-    } else {
-        ESP_LOGW(TAG, "MAC fora da tabela, usando DHCP");
+    httpd_query_key_value(buf, "ssid", raw_ssid, sizeof(raw_ssid));
+    httpd_query_key_value(buf, "pass", raw_pass, sizeof(raw_pass));
+
+    url_decode(ssid, raw_ssid, sizeof(ssid));
+    url_decode(pass, raw_pass, sizeof(pass));
+
+    /* Configura a interface STA mantendo o AP ativo para testar e pegar o IP */
+    wifi_config_t sta_cfg = {0};
+    snprintf((char *)sta_cfg.sta.ssid, sizeof(sta_cfg.sta.ssid), "%s", ssid);
+    snprintf((char *)sta_cfg.sta.password, sizeof(sta_cfg.sta.password), "%s", pass);
+
+    xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
+    s_retry_num = 0;
+
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
+    esp_wifi_disconnect();
+    esp_wifi_connect();
+
+    /* Aguarda até 12 segundos pelo IP via DHCP do roteador/hotspot */
+    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
+                                           WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+                                           pdFALSE, pdFALSE,
+                                           pdMS_TO_TICKS(12000));
+
+    char page[768];
+    if (bits & WIFI_CONNECTED_BIT) {
+        save_wifi_credentials(ssid, pass);
+
+        esp_netif_ip_info_t ip_info;
+        esp_netif_t *sta_netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+        esp_netif_get_ip_info(sta_netif, &ip_info);
+
+        uint8_t mac[6];
+        esp_read_mac(mac, ESP_MAC_WIFI_STA);
+
+        snprintf(page, sizeof(page),
+            "<!doctype html><html><head><meta charset='utf-8'>"
+            "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+            "<style>body{font-family:sans-serif;background:#121212;color:#eee;text-align:center;padding:40px}"
+            ".box{background:#1e1e1e;border:1px solid #333;border-radius:8px;padding:20px;max-width:420px;margin:auto}"
+            "code{display:block;font-size:1.2em;color:#4ea8de;margin:10px 0}</style></head><body>"
+            "<div class='box'><h3>Conectado em %s!</h3>"
+            "<p>IP atribuído na rede:</p><code>http://" IPSTR "/stream</code>"
+            "<p>Ou via mDNS:</p><code>http://eye-cam-%02x%02x.local/stream</code>"
+            "<p style='color:#aaa;font-size:0.9em'>Reiniciando em modo câmera...</p></div></body></html>",
+            ssid, IP2STR(&ip_info.ip), mac[4], mac[5]);
+
+        httpd_resp_set_type(req, "text/html");
+        httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
+
+        vTaskDelay(pdMS_TO_TICKS(4000)); /* 4s para você ler ou copiar o IP antes do reboot */
+        esp_restart();
+        return ESP_OK;
     }
 
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    /* Se a senha estiver errada ou falhar, avisa sem apagar a tela e mantém o portal aberto */
+    snprintf(page, sizeof(page),
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<style>body{font-family:sans-serif;background:#121212;color:#eee;text-align:center;padding:40px}"
+        "a{color:#4ea8de}</style></head><body>"
+        "<h3>Falha ao conectar em %s</h3>"
+        "<p>Verifique a senha ou se a rede é 2.4 GHz.</p>"
+        "<p><a href='/'>Voltar e tentar novamente</a></p></body></html>",
+        ssid);
+
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+static void start_provisioning_ap(void)
+{
+    esp_netif_create_default_wifi_ap();
 
     esp_event_handler_instance_t instance_any_id;
     esp_event_handler_instance_t instance_got_ip;
@@ -304,9 +369,98 @@ static esp_err_t init_wifi_sta(void)
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, &instance_got_ip));
 
-    wifi_config_t wifi_config = {
-        .sta = { .ssid = WIFI_SSID, .password = WIFI_PASS },
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+
+    char ap_ssid[32];
+    snprintf(ap_ssid, sizeof(ap_ssid), "EyeCam-Setup-%02X%02X", mac[4], mac[5]);
+
+    wifi_config_t ap_cfg = {
+        .ap = {
+            .channel = 6,
+            .authmode = WIFI_AUTH_OPEN,
+            .max_connection = 2,
+        },
     };
+    snprintf((char *)ap_cfg.ap.ssid, sizeof(ap_cfg.ap.ssid), "%s", ap_ssid);
+    ap_cfg.ap.ssid_len = (uint8_t)strlen(ap_ssid);
+
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    httpd_handle_t server = NULL;
+    if (httpd_start(&server, &config) == ESP_OK) {
+        httpd_uri_t root_uri = { .uri = "/",     .method = HTTP_GET,  .handler = setup_page_handler };
+        httpd_uri_t save_uri = { .uri = "/save", .method = HTTP_POST, .handler = save_wifi_handler  };
+        httpd_register_uri_handler(server, &root_uri);
+        httpd_register_uri_handler(server, &save_uri);
+    }
+
+    ESP_LOGW(TAG, "Modo Easy Wi-Fi ativo! Conecte-se no Wi-Fi '%s' e abra http://192.168.4.1", ap_ssid);
+
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+/* ---- Wi-Fi STA com fallback para Easy Wi-Fi ----------------------------- */
+
+static void wifi_event_handler(void *arg, esp_event_base_t event_base,
+                               int32_t event_id, void *event_data)
+{
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+    wifi_config_t cur_cfg;
+    if (esp_wifi_get_config(WIFI_IF_STA, &cur_cfg) == ESP_OK && strlen((char *)cur_cfg.sta.ssid) > 0) {
+        esp_wifi_connect();
+    }
+} else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (s_retry_num < WIFI_MAX_RETRY) {
+            esp_wifi_connect();
+            s_retry_num++;
+            ESP_LOGW(TAG, "Tentando conectar ao Wi-Fi (%d/%d)", s_retry_num, WIFI_MAX_RETRY);
+        } else {
+            xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
+        }
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+        ESP_LOGI(TAG, "Conectado! Abra http://" IPSTR "/stream", IP2STR(&event->ip_info.ip));
+        s_retry_num = 0;
+        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+    }
+}
+
+static esp_err_t init_wifi_sta(void)
+{
+    s_wifi_event_group = xEventGroupCreate();
+    if (!s_wifi_event_group) return ESP_FAIL;
+
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    char saved_ssid[33] = {0};
+    char saved_pass[65] = {0};
+
+    if (!load_wifi_credentials(saved_ssid, sizeof(saved_ssid), saved_pass, sizeof(saved_pass))) {
+        ESP_LOGW(TAG, "Nenhuma rede Wi-Fi salva. Abrindo portal Easy Wi-Fi...");
+        start_provisioning_ap();
+    }
+
+    esp_event_handler_instance_t instance_any_id;
+    esp_event_handler_instance_t instance_got_ip;
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(
+        WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, &instance_any_id));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(
+        IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, &instance_got_ip));
+
+    wifi_config_t wifi_config = {0};
+    snprintf((char *)wifi_config.sta.ssid, sizeof(wifi_config.sta.ssid), "%s", saved_ssid);
+    snprintf((char *)wifi_config.sta.password, sizeof(wifi_config.sta.password), "%s", saved_pass);
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
@@ -316,56 +470,19 @@ static esp_err_t init_wifi_sta(void)
     EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
                                            WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
                                            pdFALSE, pdFALSE,
-                                           pdMS_TO_TICKS(20000));
+                                           pdMS_TO_TICKS(15000));
 
     if (bits & WIFI_CONNECTED_BIT) return ESP_OK;
 
-    if (bits & WIFI_FAIL_BIT) {
-        ESP_LOGE(TAG, "Wi-Fi authentication failed for SSID: %s", WIFI_SSID);
-    } else {
-        ESP_LOGE(TAG, "Wi-Fi connection timed out for SSID: %s", WIFI_SSID);
-    }
-    vEventGroupDelete(s_wifi_event_group);
+    ESP_LOGW(TAG, "Falha ao conectar em '%s'. Voltando para o portal Easy Wi-Fi...", saved_ssid);
+    esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, instance_any_id);
+    esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, instance_got_ip);
+    esp_wifi_stop();
+    start_provisioning_ap();
     return ESP_FAIL;
 }
 
-#endif /* CONFIG_WIFI_ROLE_STA */
-
-/* ---- Wi-Fi AP ----------------------------------------------------------- */
-
-#if defined(CONFIG_WIFI_ROLE_AP)
-
-static esp_err_t init_wifi_ap(void)
-{
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_ap();
-
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-
-    const char *ssid = CONFIG_AP_SSID;
-    const char *pass = CONFIG_AP_PASSWORD;
-
-    wifi_config_t ap_config = {};
-    strncpy((char *)ap_config.ap.ssid, ssid, sizeof(ap_config.ap.ssid) - 1);
-    ap_config.ap.ssid_len     = (uint8_t)strlen(ssid);
-    strncpy((char *)ap_config.ap.password, pass, sizeof(ap_config.ap.password) - 1);
-    ap_config.ap.max_connection = CONFIG_AP_MAX_CONN;
-    ap_config.ap.authmode       = (strlen(pass) >= 8) ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
-
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
-    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
-    ESP_ERROR_CHECK(esp_wifi_start());
-
-    ESP_LOGI(TAG, "AP started — SSID: \"%s\" | IP: 192.168.4.1", ssid);
-    return ESP_OK;
-}
-
-#endif /* CONFIG_WIFI_ROLE_AP */
-
-/* ---- mDNS --------------------------------------------------------------- */
+/* ---- mDNS & Servidor HTTP do Stream ------------------------------------- */
 
 static void start_mdns(void)
 {
@@ -373,11 +490,7 @@ static void start_mdns(void)
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
 
     char hostname[24];
-#if defined(CONFIG_WIFI_ROLE_AP)
-    snprintf(hostname, sizeof(hostname), "forward-cam-%02x%02x", mac[4], mac[5]);
-#else
     snprintf(hostname, sizeof(hostname), "eye-cam-%02x%02x", mac[4], mac[5]);
-#endif
 
     if (mdns_init() != ESP_OK) {
         ESP_LOGW(TAG, "mDNS init failed");
@@ -388,8 +501,6 @@ static void start_mdns(void)
     mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
     ESP_LOGI(TAG, "mDNS ready — http://%s.local/stream", hostname);
 }
-
-/* ---- HTTP handlers ------------------------------------------------------ */
 
 static esp_err_t index_handler(httpd_req_t *req)
 {
@@ -410,8 +521,6 @@ static esp_err_t stream_handler(httpd_req_t *req)
     char part_buf[64];
     uint32_t last_seq = 0;
 
-    /* Cada cliente tem sua cópia local do frame, para não segurar o mutex
-     * durante o envio pela rede (isso travaria o callback USB). */
     uint8_t *local_buf = heap_caps_malloc(UVC_MAX_FRAME_SIZE, buf_caps());
     if (!local_buf) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Sem memória");
@@ -440,7 +549,7 @@ static esp_err_t stream_handler(httpd_req_t *req)
         }
 
         if (jpg_len == 0) {
-            vTaskDelay(pdMS_TO_TICKS(5));   /* aguarda novo frame */
+            vTaskDelay(pdMS_TO_TICKS(5));
             continue;
         }
 
@@ -487,16 +596,14 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
-    if (init_camera() != ESP_OK) return;
-
-#if defined(CONFIG_WIFI_ROLE_AP)
-    if (init_wifi_ap() != ESP_OK) return;
-#else
+    /* 1. Conecta no Wi-Fi salvo ou abre o portal Easy Wi-Fi em 192.168.4.1 */
     if (init_wifi_sta() != ESP_OK) return;
-#endif
 
+    /* 2. Inicia mDNS, servidor HTTP e só depois a câmera USB (Core 1) */
     start_mdns();
     start_webserver();
+
+    if (init_camera() != ESP_OK) return;
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(1000));
