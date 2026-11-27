@@ -203,6 +203,12 @@ Para listar o que a webcam suporta, ligue-a num PC Linux: `v4l2-ctl --list-forma
 | Aviso `phy_init: calibration data MAC check failed` | O primeiro byte do MAC lido mudou entre boots | Inofensivo: a placa recalibra o rádio. O nome mDNS usa só os dois últimos bytes e não é afetado |
 | `Error: device reports readiness to read` no topo do monitor | O monitor reiniciando a placa pela USB | Pode ignorar |
 
+## Modelo 3D com suporte para as cameras e passadores de fios
+
+[![Suporte dos Óculos NeuroEYE](docs/imagens/suporte_oculos.png)](hardware/3d/suporte_oculos.stl)
+
+*Clique na imagem acima para abrir e girar o modelo 3D interativo (`.stl`) diretamente no GitHub.*
+
 ## Estrutura do repositório (resumo)
 
 ```
