@@ -1,0 +1,101 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client"
+  output   = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Gender {
+  FEMININO
+  MASCULINO
+  OUTRO
+}
+
+// Lifecycle of a session, not a clinical judgement. Whatever turns raw
+// metrics into "saudável" vs "sinalizada" is still undefined product-side —
+// see Session fields below — so this only tracks where the session is in
+// its recording/review workflow. A doctor can set SINALIZADA manually today;
+// nothing here infers it automatically from the metrics.
+enum SessionStatus {
+  EM_ANDAMENTO
+  CONCLUIDA
+  EM_ANALISE
+  SINALIZADA
+}
+
+model Doctor {
+  id           String    @id @default(cuid())
+  name         String
+  role         String    @default("Pediatra")
+  email        String    @unique
+  passwordHash String
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  sessions     Session[]
+
+  @@map("doctors")
+}
+
+model Patient {
+  id              String    @id @default(cuid())
+  code            String    @unique
+  name            String
+  birthDate       DateTime  @db.Date
+  gender          Gender
+  guardianName    String
+  guardianContact String
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  sessions        Session[]
+
+  @@map("patients")
+}
+
+model Session {
+  id        String        @id @default(cuid())
+  patient   Patient       @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  patientId String
+  doctor    Doctor?       @relation(fields: [doctorId], references: [id], onDelete: SetNull)
+  doctorId  String?
+  status    SessionStatus @default(EM_ANDAMENTO)
+
+  startedAt       DateTime  @default(now())
+  endedAt         DateTime?
+  durationSeconds Int?
+
+  // Raw, uninterpreted metrics. No threshold is applied anywhere in this
+  // codebase to decide what counts as a healthy or concerning result —
+  // that scale is still being defined (see SessionStatus above).
+  trackingAccuracy   Float?
+  avgLatencyMs       Float?
+  saccadeCount       Int?
+  fixationDurationMs Float?
+
+  notes          String?
+  trackingPoints TrackingPoint[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([patientId])
+  @@map("sessions")
+}
+
+// Object-position vs. eye-position samples over the course of a session,
+// used to draw the tracking chart. Written once when a session is finished.
+model TrackingPoint {
+  id             String  @id @default(cuid())
+  session        Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  sessionId      String
+  timeSeconds    Float
+  objectPosition Float
+  eyePosition    Float
+
+  @@index([sessionId])
+  @@map("tracking_points")
+}
