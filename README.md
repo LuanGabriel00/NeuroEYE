@@ -18,7 +18,7 @@ O **NeuroEYE** nasceu com o objetivo de oferecer uma alternativa acessível, mod
 
 ## Modelo 3D e Estrutura Mecânica
 
-[![Estrutura 3D dos Óculos NeuroEYE](docs/imagens/preview_3d_oculos.png)](Hardware/3D/oculos_neuroeye.stl)
+[![Estrutura 3D dos Óculos NeuroEYE](docs/imagens/preview_3d_oculos.png)](Hardware/oculos_neuroeye.stl)
 
 > **Visualização interativa:** clique na imagem acima para abrir o arquivo `.stl` no visualizador 3D nativo do GitHub (com rotação e zoom), ou acesse a pasta [`Hardware/3D/`](Hardware/3D/) para baixar todas as peças para impressão.
 
