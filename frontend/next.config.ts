@@ -7,6 +7,7 @@ const nextConfig: NextConfig = {
   // Cache Components / Partial Prefetching are off: this dashboard is
   // per-doctor and data-heavy (patients, sessions), so every route should
   // render fresh rather than ship a cached/instant shell.
+  outputFileTracingRoot: __dirname,
   experimental: {
     agentFeedback: true,
   },

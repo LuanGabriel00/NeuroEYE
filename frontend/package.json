@@ -1,7 +1,8 @@
 {
-  "name": "frontend",
+  "name": "neuroeye",
   "version": "0.1.0",
   "private": true,
+  "main": "main.js",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -11,8 +12,9 @@
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
     "db:seed": "prisma db seed",
-    "db:studio": "prisma studio"
-  },
+    "db:studio": "prisma studio",
+    "electron:dev": "concurrently \"npm run dev\" \"wait-on http://localhost:3000 && electron .\"",
+    "electron:build": "npm run build && xcopy /E /I /Y .next\\static .next\\standalone\\.next\\static && xcopy /E /I /Y public .next\\standalone\\public && electron-builder --win --dir && xcopy /E /I /Y .next\\standalone dist\\win-unpacked\\resources\\standalone"  },
   "dependencies": {
     "@prisma/adapter-pg": "^7.10.1",
     "@prisma/client": "^7.10.1",
@@ -33,12 +35,33 @@
     "@types/pg": "^8.23.1",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "concurrently": "^10.0.7",
     "dotenv": "^18.0.9",
+    "electron": "^45.5.0",
+    "electron-builder": "^26.18.0",
     "eslint": "^9",
     "eslint-config-next": "16.4.5",
     "prisma": "^7.10.1",
     "tailwindcss": "^4",
     "tsx": "^4.23.15",
-    "typescript": "^5"
+    "typescript": "^5",
+    "wait-on": "^9.5.1"
+  },
+  "allowScripts": {
+    "@prisma/engines@7.10.1": true,
+    "prisma@7.10.1": true,
+    "esbuild@0.28.2": true,
+    "electron@45.5.0": true
+  },
+  "build": {
+    "appId": "com.neuroeye.app",
+    "productName": "NeuroEYE",
+    "files": [
+      "main.js",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis"
+    }
   }
 }

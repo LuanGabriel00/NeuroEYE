@@ -47,3 +47,10 @@ next-env.d.ts
 .agents/
 .windsurf/
 skills-lock.json
+
+# Electron & Next.js build outputs
+dist/
+.next/
+out/
+.env
+.env*.local
