@@ -1,4 +1,4 @@
-# NeuroEYE — Câmera de olho via Wi-Fi (ESP32-S3)
+# NeuroEYE — FirmWare Configuration (ESP32-S3)
 
 Firmware para **ESP32-S3** que captura vídeo de uma **webcam USB (UVC)** e o transmite pela rede Wi-Fi em **MJPEG sobre HTTP**. Foi pensado como módulo de captura para **rastreamento ocular** (detecção de pupila): uma placa fica voltada para o olho e, opcionalmente, outra para a cena, e o PC recebe os dois vídeos, sincroniza e processa.
 
