@@ -37,6 +37,18 @@ def test_tracks_object_moving_left_to_right(tmp_path):
     assert samples[0].position < samples[-1].position
 
 
+def test_tracks_object_using_real_frame_times_when_given(tmp_path):
+    template_path = _make_template(tmp_path)
+    video_path = _make_scene_video(tmp_path, n_frames=3)
+
+    timestamps_path = tmp_path / "scene.timestamps.csv"
+    timestamps_path.write_text("frame_idx,time_seconds\n0,0.0\n1,0.284\n2,0.6\n")
+
+    samples = track_object(video_path, template_path, fps=20.0, timestamps_path=timestamps_path)
+
+    assert [round(s.time_seconds, 3) for s in samples] == [0.0, 0.284, 0.6]
+
+
 def test_plate_tracker_returns_none_when_object_absent(tmp_path):
     template_path = _make_template(tmp_path)
     blank = np.full((240, 320, 3), 255, dtype=np.uint8)

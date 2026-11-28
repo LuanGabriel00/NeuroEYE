@@ -1,4 +1,5 @@
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,6 +13,14 @@ class SessionPaths:
     eye_video: Path
     scene_video: Path
 
+    @property
+    def eye_timestamps(self) -> Path:
+        return self.eye_video.with_suffix(".timestamps.csv")
+
+    @property
+    def scene_timestamps(self) -> Path:
+        return self.scene_video.with_suffix(".timestamps.csv")
+
 
 def session_dir(session_id: str) -> Path:
     return DATA_DIR / session_id
@@ -23,12 +32,16 @@ def paths_for(session_id: str) -> SessionPaths:
 
 
 class SessionRecorder:
-    """Records the eye and scene camera streams in parallel for one session."""
+    """Records the eye and scene camera streams in parallel for one session,
+    sharing a single clock origin (`start_time`) between both recorders so
+    their timestamp logs stay comparable even if the two cameras deliver
+    frames at different, jittery rates over Wi-Fi."""
 
     def __init__(self, session_id: str, eye_url: str, scene_url: str):
         self.paths = paths_for(session_id)
-        self._eye = MjpegRecorder(eye_url, self.paths.eye_video)
-        self._scene = MjpegRecorder(scene_url, self.paths.scene_video)
+        start_time = time.monotonic()
+        self._eye = MjpegRecorder(eye_url, self.paths.eye_video, start_time=start_time)
+        self._scene = MjpegRecorder(scene_url, self.paths.scene_video, start_time=start_time)
         self._threads: list[threading.Thread] = []
 
     def start(self):

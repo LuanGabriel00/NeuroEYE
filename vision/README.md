@@ -16,7 +16,14 @@ data/       vídeos, templates e arquivos intermediários (gitignored)
 ## Fluxo de uma sessão
 
 1. Durante a gravação, `capture.SessionRecorder` salva `eye.mp4` e `scene.mp4`
-   em `data/sessions/<session_id>/`.
+   em `data/sessions/<session_id>/`, cada um com um `.timestamps.csv` do
+   lado — o horário real de chegada de cada frame no PC, numa origem de
+   relógio compartilhada entre as duas câmeras. Isso existe porque as duas
+   placas ESP32 são independentes e o Wi-Fi varia a latência de cada uma
+   de um jeito diferente: gravar assumindo um fps fixo deixaria os dois
+   vídeos saírem de sincronia ao longo da sessão. `gaze.icatcher_adapter`
+   e `mapping.target_zone` usam esse horário real em vez do fps quando o
+   arquivo existe.
 2. Depois que a sessão termina, `pipeline/run_session.py process <session_id>` roda:
    - `gaze.icatcher_adapter` no `eye.mp4` → lista de (tempo, rótulo de olhar).
    - `mapping.target_zone` no `scene.mp4` → posição do objeto por frame,
@@ -64,8 +71,11 @@ login de médica pro pipeline conseguir mandar o resultado.
 # 1. grava a sessão (roda durante a gravação em si)
 python -m pipeline.run_session record <session_id> --eye-url http://<ip-camera-olho>/stream --scene-url http://<ip-camera-cena>/stream --duration 60
 
-# 2. processa o vídeo gravado e manda o resultado pro dashboard
+# 2a. processa o vídeo gravado e manda o resultado pro dashboard
 python -m pipeline.run_session process <session_id> --template data/templates/<objeto>.jpg
+
+# 2b. ou só calcula e salva localmente (CSV + resumo + gráfico), sem precisar do dashboard
+python -m pipeline.run_session results <session_id> --template data/templates/<objeto>.jpg --plot
 ```
 
 O template é só uma foto de referência do objeto usado na sessão (recortada,

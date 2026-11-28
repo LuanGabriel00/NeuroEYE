@@ -20,12 +20,18 @@ def main():
     parser = argparse.ArgumentParser(description="Roda o iCatcher+ num vídeo de olho real e mostra um resumo.")
     parser.add_argument("video", type=Path, help="Caminho do vídeo do olho (mp4, etc.)")
     parser.add_argument("--fps", type=float, default=None, help="FPS do vídeo (detecta automaticamente se não passar)")
+    parser.add_argument(
+        "--timestamps",
+        type=Path,
+        default=None,
+        help="Sidecar .timestamps.csv gravado por capture.camera_source numa sessão ao vivo (usa o tempo real de cada frame em vez do fps).",
+    )
     args = parser.parse_args()
 
     fps = args.fps or detect_fps(args.video)
     print(f"Rodando iCatcher+ em {args.video} ({fps:.1f} fps)...")
 
-    samples = run_icatcher(args.video, fps=fps)
+    samples = run_icatcher(args.video, fps=fps, timestamps_path=args.timestamps)
 
     counts = {}
     for s in samples:

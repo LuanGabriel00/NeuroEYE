@@ -1,4 +1,5 @@
 import re
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -6,17 +7,31 @@ import cv2
 import numpy as np
 import requests
 
+from frame_timestamps import HEADER
+
 
 class MjpegRecorder:
     """Reads an MJPEG HTTP stream (same framing used by the ESP32 firmware
-    and by sync.py) and writes every frame to a video file until stopped."""
+    and by sync.py) and writes every frame to a video file until stopped.
 
-    def __init__(self, url: str, output_path: Path, fps: int = 20):
+    Also logs each frame's real arrival time (relative to `start_time`) to
+    a `.timestamps.csv` sidecar next to the video. The two ESP32 boards are
+    independent and Wi-Fi adds jitter differently to each, so assuming a
+    fixed frame rate would silently let the eye and scene videos drift out
+    of sync over a session; `start_time` lets both recordings share the
+    same clock origin instead.
+    """
+
+    def __init__(self, url: str, output_path: Path, fps: int = 20, start_time: Optional[float] = None):
         self.url = url
         self.output_path = output_path
         self.fps = fps
+        self.start_time = start_time if start_time is not None else time.monotonic()
+        self.timestamps_path = output_path.with_suffix(".timestamps.csv")
         self._stop = False
         self._writer: Optional[cv2.VideoWriter] = None
+        self._timestamps_file = None
+        self._frame_count = 0
 
     def stop(self):
         self._stop = True
@@ -32,8 +47,15 @@ class MjpegRecorder:
                     buf += chunk
                     self._drain_frames(buf)
         finally:
-            if self._writer is not None:
-                self._writer.release()
+            self.close()
+
+    def close(self):
+        if self._writer is not None:
+            self._writer.release()
+            self._writer = None
+        if self._timestamps_file is not None:
+            self._timestamps_file.close()
+            self._timestamps_file = None
 
     def _drain_frames(self, buf: bytearray):
         while True:
@@ -63,4 +85,14 @@ class MjpegRecorder:
             h, w = frame.shape[:2]
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
             self._writer = cv2.VideoWriter(str(self.output_path), fourcc, self.fps, (w, h))
+        if self._timestamps_file is None:
+            self.timestamps_path.parent.mkdir(parents=True, exist_ok=True)
+            self._timestamps_file = self.timestamps_path.open("w")
+            self._timestamps_file.write(HEADER)
+
+        elapsed = time.monotonic() - self.start_time
+        self._timestamps_file.write(f"{self._frame_count},{elapsed:.6f}\n")
+        self._timestamps_file.flush()
+
         self._writer.write(frame)
+        self._frame_count += 1

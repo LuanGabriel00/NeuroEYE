@@ -1,10 +1,12 @@
 import bisect
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
+
+from frame_timestamps import load as load_frame_times
 
 
 @dataclass
@@ -111,9 +113,25 @@ class PlateTracker:
         return None
 
 
-def track_object(video_path: Path, template_path: Path, fps: float = 30.0) -> List[ObjectSample]:
+def track_object(
+    video_path: Path,
+    template_path: Path,
+    fps: float = 30.0,
+    timestamps_path: Optional[Path] = None,
+) -> List[ObjectSample]:
     """Runs PlateTracker over every frame of the scene video, returning one
-    sample per frame where the object was found."""
+    sample per frame where the object was found.
+
+    `timestamps_path` is the sidecar `.timestamps.csv` capture.camera_source
+    writes during a live recording — when given, each frame's real arrival
+    time is used instead of assuming a fixed `fps`, so this lines up with
+    gaze.icatcher_adapter's samples even if the two cameras' frame rates
+    drifted apart over Wi-Fi during the session.
+    """
+    frame_times: Optional[Dict[int, float]] = (
+        load_frame_times(timestamps_path) if timestamps_path and timestamps_path.exists() else None
+    )
+
     tracker = PlateTracker(template_path)
     cap = cv2.VideoCapture(str(video_path))
     samples: List[ObjectSample] = []
@@ -128,7 +146,8 @@ def track_object(video_path: Path, template_path: Path, fps: float = 30.0) -> Li
                 x, y, w, h = bbox
                 center_x = x + w / 2.0
                 position = (center_x / frame.shape[1]) * 2.0 - 1.0
-                samples.append(ObjectSample(time_seconds=frame_idx / fps, position=position))
+                time_seconds = frame_times[frame_idx] if frame_times and frame_idx in frame_times else frame_idx / fps
+                samples.append(ObjectSample(time_seconds=time_seconds, position=position))
             frame_idx += 1
     finally:
         cap.release()

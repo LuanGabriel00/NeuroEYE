@@ -21,12 +21,18 @@ def main():
     parser.add_argument("video", type=Path, help="Caminho do vídeo da cena (mp4, etc.)")
     parser.add_argument("--template", type=Path, required=True, help="Foto de referência do objeto")
     parser.add_argument("--fps", type=float, default=None)
+    parser.add_argument(
+        "--timestamps",
+        type=Path,
+        default=None,
+        help="Sidecar .timestamps.csv gravado por capture.camera_source numa sessão ao vivo (usa o tempo real de cada frame em vez do fps).",
+    )
     args = parser.parse_args()
 
     fps = args.fps or detect_fps(args.video)
     print(f"Rastreando objeto em {args.video} ({fps:.1f} fps)...")
 
-    samples = track_object(args.video, args.template, fps=fps)
+    samples = track_object(args.video, args.template, fps=fps, timestamps_path=args.timestamps)
 
     cap = cv2.VideoCapture(str(args.video))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))

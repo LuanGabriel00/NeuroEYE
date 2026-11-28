@@ -1,3 +1,5 @@
+import csv
+
 import cv2
 import numpy as np
 
@@ -22,7 +24,7 @@ def test_drain_frames_writes_every_frame_to_the_video(tmp_path):
     buf = _build_mjpeg_payload(n_frames=5)
 
     recorder._drain_frames(buf)
-    recorder._writer.release()
+    recorder.close()
 
     cap = cv2.VideoCapture(str(output_path))
     count = 0
@@ -36,8 +38,39 @@ def test_drain_frames_writes_every_frame_to_the_video(tmp_path):
     assert count == 5
 
 
-def test_drain_frames_holds_incomplete_frame_in_buffer():
-    recorder = MjpegRecorder(url="http://unused", output_path=None, fps=10)
+def test_drain_frames_logs_a_timestamp_per_frame(tmp_path):
+    output_path = tmp_path / "out.mp4"
+    recorder = MjpegRecorder(url="http://unused", output_path=output_path, fps=10, start_time=0.0)
+    buf = _build_mjpeg_payload(n_frames=4)
+
+    recorder._drain_frames(buf)
+    recorder.close()
+
+    with recorder.timestamps_path.open() as f:
+        rows = list(csv.DictReader(f))
+
+    assert len(rows) == 4
+    assert [int(r["frame_idx"]) for r in rows] == [0, 1, 2, 3]
+    times = [float(r["time_seconds"]) for r in rows]
+    assert times == sorted(times)
+    assert all(t >= 0 for t in times)
+
+
+def test_two_recorders_sharing_start_time_use_the_same_clock_origin(tmp_path):
+    shared_start = 100.0
+    eye = MjpegRecorder(url="http://unused", output_path=tmp_path / "eye.mp4", fps=10, start_time=shared_start)
+    scene = MjpegRecorder(url="http://unused", output_path=tmp_path / "scene.mp4", fps=10, start_time=shared_start)
+
+    eye._drain_frames(_build_mjpeg_payload(n_frames=1))
+    scene._drain_frames(_build_mjpeg_payload(n_frames=1))
+    eye.close()
+    scene.close()
+
+    assert eye.start_time == scene.start_time == shared_start
+
+
+def test_drain_frames_holds_incomplete_frame_in_buffer(tmp_path):
+    recorder = MjpegRecorder(url="http://unused", output_path=tmp_path / "out.mp4", fps=10)
     full_payload = _build_mjpeg_payload(n_frames=1)
     incomplete = bytearray(full_payload[:-20])
 
